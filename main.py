@@ -1,59 +1,75 @@
+import requests
 import re
+import json
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse
 
-# 目标地址
-LIVE_URL = "https://m.miguvideo.com/m/liveDetail/955227985?channelId=10010001005"
+# 基础配置
+LIVE_DETAIL_URL = "https://m.miguvideo.com/m/liveDetail/955227985?channelId=10010001005"
+CHANNEL_ID = "10010001005"
+LIVE_ID = "955227985"
 OUTPUT_FILE = "iptv_source.txt"
 CHANNEL_NAME = "南通新闻综合"
 
-# 过滤重复与无效链接
-def filter_source(url_list):
-    valid = []
-    seen = set()
-    rule = re.compile(r"https.+?\.m3u8")
-    for url in url_list:
-        res = rule.findall(url)
-        for item in res:
-            if item not in seen and "miguvideo" in item:
-                seen.add(item)
-                valid.append(item)
-    return valid
+# 通用请求头
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Referer": "https://m.miguvideo.com/"
+}
 
-def get_migu_live_source():
+def get_live_info():
+    """获取直播基础信息与播放密钥"""
+    session = requests.Session()
+    try:
+        # 先访问详情页获取cookie与基础参数
+        session.get(LIVE_DETAIL_URL, headers=HEADERS, timeout=20)
+        
+        # 咪咕直播播放接口
+        api_url = f"https://m.miguvideo.com/miguvideo/live/getLivePlayInfo"
+        params = {
+            "liveId": LIVE_ID,
+            "channelId": CHANNEL_ID,
+            "vType": "3",
+            "terminalType": "2"
+        }
+        res = session.get(api_url, params=params, headers=HEADERS, timeout=20)
+        res_data = res.json()
+        return res_data
+    except Exception as e:
+        print(f"接口请求失败：{e}")
+        return None
+
+def parse_m3u8_source(api_data):
+    """解析接口返回数据，提取有效播放源"""
     source_list = []
-    with sync_playwright() as p:
-        # 启动浏览器，无头模式
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-        )
-        page = context.new_page()
-
-        # 监听网络请求，拦截直播地址
-        def handle_request(req):
-            req_url = req.url
-            if ".m3u8" in req_url:
-                source_list.append(req_url)
-
-        page.on("request", handle_request)
-        page.goto(LIVE_URL, timeout=30000)
-        # 等待视频加载
-        page.wait_for_timeout(8000)
-        browser.close()
+    if not api_data or api_data.get("code") != 200:
+        return source_list
     
-    return filter_source(source_list)
-
-def save_txt(sources):
-    content = "iptv,#genre#\n"
-    for src in sources:
-        content += f"{CHANNEL_NAME},{src}\n"
+    play_info = api_data.get("data", {})
+    stream_list = play_info.get("streamList", [])
     
+    for stream in stream_list:
+        play_url = stream.get("playUrl")
+        if play_url and ".m3u8" in play_url:
+            source_list.append(play_url)
+    
+    # 去重
+    unique_sources = list(set(source_list))
+    return unique_sources
+
+def save_iptv_file(source_list):
+    """按指定格式保存文本"""
+    lines = ["iptv,#genre#"]
+    for src in source_list:
+        lines.append(f"{CHANNEL_NAME},{src}")
+    
+    content = "\n".join(lines)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"抓取完成，获取到{len(sources)}条有效直播源")
+    print(f"[{datetime.now()}] 抓取完成，共获取 {len(source_list)} 条直播源")
     print(content)
 
 if __name__ == "__main__":
-    live_sources = get_migu_live_source()
-    save_txt(live_sources)
+    info_data = get_live_info()
+    sources = parse_m3u8_source(info_data)
+    save_iptv_file(sources)
